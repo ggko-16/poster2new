@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="ka">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>ჯადოსნური საჩუქარი — AR ვარდი (კამერის გამოსწორება v3)</title>
+  <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
+  <style>
+    html, body { margin: 0; width: 100%; height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #fff; }
+    html { background: #10121a; }
+    body { background: transparent; }
+    /* MindAR ვიდეოს მშობელ ელემენტში ტვირთავს და z-index: -2-ს ანიჭებს.
+       მუქი body ფონის უკან რომ არ აღმოჩნდეს, ვიდეოს ზემოთ ვწევთ,
+       ხოლო გამჭვირვალე A-Frame canvas-ს ზემოდან ვათავსებთ. */
+    #arRoot { position: fixed; inset: 0; width: 100%; height: 100%; overflow: hidden; isolation: isolate; background: #10121a; }
+    #arRoot > video { z-index: 0 !important; display: block !important; visibility: visible !important; opacity: 1 !important; }
+    #arRoot > a-scene { position: absolute !important; inset: 0; width: 100% !important; height: 100% !important; z-index: 1 !important; background: transparent !important; }
+    #arRoot canvas, #arRoot .a-canvas { background: transparent !important; }
+    #debug { color: #ffe5ba; font-size: 11px; line-height: 1.35; margin-top: 7px; }
+    .hud { position: fixed; z-index: 20; bottom: max(20px, env(safe-area-inset-bottom)); left: 12px; right: 12px; margin: auto; max-width: 410px; background: rgba(24, 19, 32, .86); border: 1px solid rgba(255,255,255,.18); border-radius: 16px; padding: 15px; text-align: center; backdrop-filter: blur(10px); }
+    #status { font-size: 14px; line-height: 1.5; margin: 0 0 10px; }
+    button { background: #d93475; color: white; border: 0; border-radius: 10px; padding: 12px 17px; font-size: 15px; font-weight: 700; font-family: inherit; cursor: pointer; }
+    button:disabled { opacity: .5; } button[hidden] { display:none; }
+    #replay { background: rgba(255,255,255,.15); font-size: 12px; padding: 8px 12px; margin-left: 4px; }
+    #note { display: block; font-size: 12px; opacity: .8; margin-top: 8px; }
+  </style>
+  <script>
+    /* ======================= პარამეტრები =========================
+      თუ targets.mind შექმნილია ვერტიკალური A3 პოსტერიდან:
+      მისი სიგანის მიმართ სიმაღლე არის 42/29.7 = 1.414.
+      თუ კვადრატული სურათია, მიუთითე 1; ჰორიზონტალური A3: 29.7/42.
+
+      CLEAN_POSTER: იმავე პოსტერის იდენტური სურათი, მხოლოდ
+      დახატული საჩუქრის ყუთის გარეშე. თუ ჯერ არ გაქვს, დატოვე ''.
+      ასე პირველ რიგში 3D ეფექტს შეამოწმებ.
+    ============================================================ */
+    const POSTER_HEIGHT = 1.414;
+    const CLEAN_POSTER = ''; // მაგალითად: './poster-clean.jpg'
+
+    AFRAME.registerComponent('rose-gift', {
+      init() {
+        const T = AFRAME.THREE;
+        this.T = T;
+        this.stage = 'hidden';
+        this.startTime = 0;
+        this.openTime = 0;
+        this.group = new T.Group();
+        this.el.setObject3D('mesh', this.group);
+        this.group.visible = false;
+
+        const mat = (color, metalness=0.0, roughness=.65) =>
+          new T.MeshStandardMaterial({ color, metalness, roughness, side:T.DoubleSide });
+        const pink = mat('#e26b91', .12, .45);
+        const pinkLight = mat('#f6adc0', .08, .5);
+        const gold = mat('#edc46c', .5, .29);
+        const darkGold = mat('#b8863b', .5, .35);
+        const green = mat('#2f8b4b');
+        const greenLight = mat('#55b76e');
+        const red = [mat('#a91340'), mat('#c91d4f'), mat('#e53c69'), mat('#fb7190')];
+
+        const boxPart = (parent, sx, sy, sz, x, y, z, material) => {
+          const mesh = new T.Mesh(new T.BoxGeometry(sx,sy,sz), material);
+          mesh.position.set(x,y,z); parent.add(mesh); return mesh;
+        };
+
+        this.spinGroup = new T.Group();
+        this.group.add(this.spinGroup);
+        // ღია ზედაპირიანი ნამდვილი 3D ყუთი, არა ერთი დახურული კუბი
+        const w=.37, h=.29, d=.32, thick=.022;
+        boxPart(this.spinGroup,w,thick,d,0,-h/2,0,pink);
+        boxPart(this.spinGroup,w,h,thick,0,0,-d/2,pink);
+        boxPart(this.spinGroup,w,h,thick,0,0,d/2,pink);
+        boxPart(this.spinGroup,thick,h,d,-w/2,0,0,pink);
+        boxPart(this.spinGroup,thick,h,d,w/2,0,0,pink);
+
+        // ოქროსფერი ლენტები ოთხივე მხრიდან
+        boxPart(this.spinGroup,.058,h+.002,.009,0,0,d/2+.015,gold);
+        boxPart(this.spinGroup,w+.002,.054,.009,0,-.018,d/2+.02,darkGold);
+        boxPart(this.spinGroup,.009,h+.002,.058,w/2+.018,0,0,gold);
+
+        // სახურავის სახსარი უკანა, ზედა კიდესთან
+        this.lidPivot = new T.Group();
+        this.lidPivot.position.set(0,h/2,-d/2);
+        this.spinGroup.add(this.lidPivot);
+        boxPart(this.lidPivot,w+.045,.055,d+.045,0,.018,d/2,pinkLight);
+        boxPart(this.lidPivot,.065,.062,d+.052,0,.025,d/2,gold);
+        boxPart(this.lidPivot,w+.055,.065,.065,0,.026,d/2,darkGold);
+        // პატარა ბაფთა სახურავზე
+        const bowGeo = new T.TorusGeometry(.058,.013,7,28,Math.PI*1.48);
+        const bow1 = new T.Mesh(bowGeo,gold);
+        bow1.position.set(-.055,.067,d/2);
+        bow1.rotation.set(Math.PI/2,0,.35);
+        this.lidPivot.add(bow1);
+        const bow2 = bow1.clone();
+        bow2.position.x=.055;
+        bow2.rotation.z=-.35;
+        this.lidPivot.add(bow2);
+
+        // ვარდის საკუთარი 3D გეომეტრია — უფასო, ცალკე GLB ფაილის გარეშე
+        this.rose = new T.Group();
+        this.rose.position.y=-.31;
+        this.spinGroup.add(this.rose);
+        const stem = new T.Mesh(new T.CylinderGeometry(.009,.013,.33,10),green);
+        stem.position.y=.035;
+        this.rose.add(stem);
+        const leafGeo = new T.SphereGeometry(1,15,10);
+        for (const side of [-1,1]) {
+          const leaf = new T.Mesh(leafGeo, side===1 ? greenLight : green);
+          leaf.scale.set(.075,.020,.039);
+          leaf.position.set(side*.056,.025,.01);
+          leaf.rotation.z=side*.30;
+          this.rose.add(leaf);
+        }
+        const bloom = new T.Group();
+        bloom.position.y=.245;
+        this.rose.add(bloom);
+        const bottom = new T.Mesh(new T.SphereGeometry(.045,14,10), green);
+        bottom.scale.set(1,.7,1); bottom.position.y=-.025; bloom.add(bottom);
+        const bud = new T.Mesh(new T.SphereGeometry(.057,16,12),red[0]);
+        bud.scale.set(1,1.12,1); bloom.add(bud);
+        for (let ring=0; ring<3; ring++) {
+          const count=[5,7,9][ring];
+          const r=[.034,.065,.090][ring];
+          for (let i=0;i<count;i++) {
+            const angle=2*Math.PI*i/count + ring*.33;
+            const petal=new T.Mesh(new T.SphereGeometry(1,14,10),red[Math.min(3,ring+1)]);
+            petal.scale.set([.036,.050,.055][ring], [.070,.070,.061][ring], .016);
+            petal.position.set(Math.cos(angle)*r,[.012,-.003,-.030][ring],Math.sin(angle)*r);
+            petal.rotation.set(Math.sin(angle)*(.18+ring*.18), Math.PI/2-angle,
+              -Math.cos(angle)*(.18+ring*.18));
+            bloom.add(petal);
+          }
+        }
+        // ვარდის შიგნით პატარა სპირალი
+        const spiral=new T.Mesh(new T.TorusGeometry(.023,.008,7,24,Math.PI*1.65),red[1]);
+        spiral.rotation.x=Math.PI/2;
+        spiral.position.y=.060;
+        bloom.add(spiral);
+
+        // ციმციმა ნაწილაკები
+        this.sparkles=[];
+        const sparkleMat=new T.MeshBasicMaterial({color:'#ffe5a0',transparent:true,opacity:.9});
+        for(let i=0;i<18;i++) {
+          const p=new T.Mesh(new T.SphereGeometry(.008+(i%3)*.003,8,6),sparkleMat);
+          p.visible=false;
+          p.userData.a=i*2.39996;
+          p.userData.r=.12+(i%4)*.045;
+          p.userData.v=.45+(i%5)*.12;
+          this.spinGroup.add(p);
+          this.sparkles.push(p);
+        }
+
+        // უხილავი სენსორული ზონა ყუთის წინ; raycaster-ისთვის გეომეტრია ჩანს
+        const hit=new T.Mesh(new T.BoxGeometry(.47,.42,.43),
+          new T.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false}));
+        hit.position.set(0,0,.12);
+        this.group.add(hit);
+
+        this.el.addEventListener('click', () => this.open());
+      },
+      reset() {
+        this.stage='entering';
+        this.startTime=performance.now();
+        this.group.visible=true;
+        this.group.position.set(0,0,.025);
+        this.group.scale.setScalar(.07);
+        this.spinGroup.rotation.set(0,-.3,0);
+        this.lidPivot.rotation.x=0;
+        this.rose.position.y=-.31;
+        this.sparkles.forEach(p=>p.visible=false);
+      },
+      hide() { this.stage='hidden'; this.group.visible=false; },
+      open() {
+        if(this.stage!=='ready') return;
+        this.stage='opening';
+        this.openTime=performance.now();
+        document.querySelector('#status').textContent='ყუთი იხსნება… 🌹';
+      },
+      tick() {
+        if(this.stage==='hidden')return;
+        const now=performance.now();
+        const clamp=x=>Math.min(1,Math.max(0,x));
+        const ease=x=>1-Math.pow(1-clamp(x),3);
+        if(this.stage==='entering') {
+          const p=ease((now-this.startTime)/1000);
+          this.group.scale.setScalar(.07+.93*p);
+          this.group.position.z=.025+.30*p;
+          this.spinGroup.rotation.y=-.30*(1-p);
+          if(p>=1){this.stage='ready';document.querySelector('#status').textContent='🎁 შეეხე ყუთს — შიგნით სიურპრიზია!';}
+          return;
+        }
+        if(this.stage==='ready') {
+          this.group.position.y=.006*Math.sin(now*.0028);
+          return;
+        }
+        if(this.stage==='opening' || this.stage==='opened') {
+          const t=(now-this.openTime)/1000;
+          this.group.position.y=0;
+          this.spinGroup.rotation.y=Math.PI*2*ease(t/1.05);
+          this.lidPivot.rotation.x=-1.99*ease((t-.82)/.9);
+          this.rose.position.y=-.31 + .48*ease((t-1.43)/1.23);
+          if(t>2.35) {
+            this.sparkles.forEach((p,i)=>{
+              p.visible=true;
+              const a=p.userData.a + t*.18;
+              p.position.set(Math.cos(a)*p.userData.r,
+                .15+((t-2.3)*p.userData.v+i*.11)%0.42,
+                Math.sin(a)*p.userData.r);
+              const s=.75+.35*Math.sin(t*5+i);
+              p.scale.setScalar(s);
+            });
+          }
+          if(t>=2.9 && this.stage!=='opened') {
+            this.stage='opened';
+            document.querySelector('#status').textContent='🌹 ვარდი შენთვის!';
+            document.querySelector('#replay').hidden=false;
+          }
+        }
+      }
+    });
+  </script>
+</head>
+<body>
+  <div class="hud">
+    <p id="status">დააჭირე „კამერის ჩართვას“, შემდეგ მიუშვირე ტელეფონი პოსტერს.</p>
+    <button id="start">📷 კამერის ჩართვა</button>
+    <button id="replay" hidden>↻ თავიდან</button>
+    <small id="note">პირველ გახსნაზე კამერის ნებართვა დაგჭირდება.</small>
+    <div id="debug"></div>
+  </div>
+
+  <div id="arRoot">
+  <a-scene id="arScene"
+    mindar-image="imageTargetSrc: ./targets.mind; autoStart: false; uiLoading: no; uiScanning: no; uiError: no"
+    embedded color-space="sRGB" renderer="alpha: true; colorManagement: true"
+    vr-mode-ui="enabled: false" device-orientation-permission-ui="enabled: false">
+    <a-camera position="0 0 0" look-controls="enabled: false"
+      cursor="fuse: false; rayOrigin: mouse"
+      raycaster="objects: .clickable; far: 100; interval: 0"></a-camera>
+    <a-entity light="type: ambient; color: #ffffff; intensity: 1.4"></a-entity>
+    <a-entity light="type: directional; color: #ffffff; intensity: 1.0" position="-1 3 4"></a-entity>
+    <a-entity id="posterTarget" mindar-image-target="targetIndex: 0">
+      <a-plane id="cleanCover" position="0 0 0.009" visible="false"
+        width="1" height="1.414" material="shader: flat; side: double"></a-plane>
+      <a-entity id="gift" class="clickable" rose-gift position="0 -0.06 0.018"></a-entity>
+    </a-entity>
+  </a-scene>
+  </div>
+
+  <script>
+    const scene = document.querySelector('#arScene');
+    const target = document.querySelector('#posterTarget');
+    const giftEl = document.querySelector('#gift');
+    const cover = document.querySelector('#cleanCover');
+    const start = document.querySelector('#start');
+    const replay = document.querySelector('#replay');
+    const status = document.querySelector('#status');
+    cover.setAttribute('height',POSTER_HEIGHT);
+    if(CLEAN_POSTER) {
+      cover.setAttribute('material','src',CLEAN_POSTER);
+      cover.setAttribute('visible',true);
+    }
+    const debug = document.querySelector('#debug');
+    let ready = false;
+    let booting = false;
+    let watchdog = null;
+
+    function repairCameraLayer() {
+      const mindar = scene.systems['mindar-image-system'];
+      const video = mindar && mindar.video;
+      if (!video) return false;
+      video.style.setProperty('z-index', '0', 'important');
+      video.style.setProperty('visibility', 'visible', 'important');
+      video.style.setProperty('display', 'block', 'important');
+      video.style.setProperty('opacity', '1', 'important');
+      if (scene.renderer) scene.renderer.setClearColor(0x000000, 0);
+      debug.textContent = `კამერა: ${video.videoWidth}×${video.videoHeight}, მდგომარეობა: ${video.readyState} ${video.paused ? '(გაჩერებულია)' : '(მუშაობს)'}`;
+      return true;
+    }
+
+    // ვიდეო MindAR-ის მიერ მოგვიანებით ემატება. ვასწორებთ, როდესაც გამოჩნდება.
+    new MutationObserver(() => repairCameraLayer()).observe(
+      document.querySelector('#arRoot'), {childList:true});
+
+    start.addEventListener('click', async () => {
+      if (booting) return;
+      if (!window.isSecureContext) {
+        status.textContent = 'გახსენი HTTPS საიტზე და არა პირდაპირ HTML ფაილით.';
+        return;
+      }
+      booting = true;
+      start.disabled = true;
+      status.textContent = 'კამერა იტვირთება…';
+      debug.textContent = 'თუ ნებართვას გკითხავს, აირჩიე Allow.';
+      try {
+        if (!scene.hasLoaded) {
+          await new Promise(resolve => scene.addEventListener('loaded', resolve, {once:true}));
+        }
+        scene.systems['mindar-image-system'].start();
+        watchdog = setTimeout(() => {
+          if (!ready) {
+            status.textContent = 'კამერა დროულად ვერ ჩაირთო. გადაამოწმე ნებართვა და targets.mind.';
+            start.textContent = '↻ ხელახლა ცდა';
+            start.disabled = false;
+            booting = false;
+          }
+        }, 18000);
+      } catch (err) {
+        console.error(err);
+        status.textContent = 'გაშვების შეცდომა: ' + (err.message || err);
+        start.disabled = false;
+        booting = false;
+      }
+    });
+    // სცენა ნამდვილად მზადაა მხოლოდ arReady მოვლენის შემდეგ.
+    scene.addEventListener('arReady', () => {
+      ready = true;
+      booting = false;
+      if (watchdog) clearTimeout(watchdog);
+      repairCameraLayer();
+      start.hidden = true;
+      status.textContent = 'კამერა ჩაირთო — მიუშვირე პოსტერს.';
+      // Video ზომები ჩამოყალიბების შემდეგაც გადავამოწმოთ.
+      setTimeout(repairCameraLayer, 200);
+    });
+    // თუ ფაილი ვერ ჩაიტვირთა, საკითხი ფაილშია და არა კამერაში.
+    fetch('./targets.mind', {method: 'HEAD'}).then(r => {
+      if (!r.ok) {
+        status.textContent = 'ვერ მოიძებნა targets.mind. ატვირთე index.html-ის გვერდით.';
+      }
+    }).catch(() => {});
+    target.addEventListener('targetFound',()=>{
+      replay.hidden=true;
+      giftEl.components['rose-gift'].reset();
+      status.textContent='საჩუქარი ჩნდება…';
+    });
+    target.addEventListener('targetLost',()=>{
+      giftEl.components['rose-gift'].hide();
+      replay.hidden=true;
+      status.textContent='კამერა თავიდან მიუშვირე პოსტერს.';
+    });
+    replay.addEventListener('click',()=>{
+      replay.hidden=true;
+      giftEl.components['rose-gift'].reset();
+    });
+    scene.addEventListener('arError',()=>{
+      if (watchdog) clearTimeout(watchdog);
+      booting = false;
+      status.textContent='კამერა ვერ გაიხსნა. გადაამოწმე ნებართვა, HTTPS და targets.mind.';
+      start.hidden=false;
+      start.disabled=false;
+      start.textContent='↻ ხელახლა ცდა';
+    });
+  </script>
+</body>
+</html>
